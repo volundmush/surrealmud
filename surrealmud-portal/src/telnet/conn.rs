@@ -25,6 +25,7 @@ use futures::{
 
 use bitflags::bitflags;
 use serde::{Deserialize, Serialize};
+use serde_json::value as JsonValue;
 
 use crate::telnet::{
     codes as tc,
@@ -157,6 +158,13 @@ impl Default for TelnetTimers {
     }
 }
 
+pub enum Msg2TelnetProtocol {
+    GameClose,
+    GMCP(String, JsonValue),
+    Text(String),
+    MSSP(Vec<(String, String)>),
+}
+
 pub struct TelnetProtocol<T> {
     // This serves as a higher-level actor that abstracts a bunch of the lower-level
     // nitty-gritty so the Session doesn't need to deal with it.
@@ -174,6 +182,8 @@ pub struct TelnetProtocol<T> {
     time_created: Instant,
     time_activity: Instant,
     timers: TelnetTimers,
+    tx_protocol: mpsc::Sender<Msg2TelnetProtocol>,
+    rx_protocol: mpsc::Receiver<Msg2TelnetProtocol>
 }
 
 
@@ -185,6 +195,8 @@ impl<T> TelnetProtocol<T> where T: AsyncRead + AsyncWrite + Send + 'static + Unp
         let mut out = Self {
             conn_id,
             conn,
+            tx_protocol,
+            rx_protocol,
             running: true,
             app_buffer: BytesMut::with_capacity(1024),
             time_created: Instant::now(),
@@ -360,16 +372,17 @@ impl<T> TelnetProtocol<T> where T: AsyncRead + AsyncWrite + Send + 'static + Unp
         // TODO: Handle protocol commands
     }
 
-    async fn process_protocol_message(&mut self, msg: Msg2MudProtocol) {
+    async fn process_protocol_message(&mut self, msg: Msg2TelnetProtocol) {
         match msg {
-            Msg2MudProtocol::Disconnect => {
+            Msg2TelnetProtocol::GameClose => {
                 self.running = false;
             },
-            Msg2MudProtocol::Data(v) => {
-                for d in v {
-                    let _ = self.process_protocol_message_data(d).await;
-                }
+            Msg2TelnetProtocol::GMCP(v, j) => {
+
             },
+            Msg2TelnetProtocol::Text(t) => {
+
+            }
         }
     }
 

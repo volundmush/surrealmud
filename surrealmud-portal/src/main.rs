@@ -13,7 +13,7 @@ use tracing_subscriber;
 
 use surrealdb::{Error, Surreal};
 use surrealdb::opt::auth::Root;
-use surrealdb::engine::remote::ws::{Ws, Wss};
+use surrealdb::engine::remote::ws::{Ws, Wss, Client};
 
 use surrealmud_shared::TotalConf;
 
