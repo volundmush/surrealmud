@@ -1,0 +1,8 @@
+/target
+.idea/
+.vscode/
+Cargo.lock
+# Obviously don't git logs....
+data/logs/*.log
+# We don't want any user-settings either.
+data/config.user*.toml

@@ -1,0 +1,20 @@
+[package]
+name = "surrealmud-portal"
+version = "0.1.0"
+edition.workspace = true
+
+[dependencies]
+tokio = {workspace = true}
+tokio-stream = {workspace = true}
+tokio-util = {workspace = true}
+bytes = {workspace = true}
+flate2 = {workspace = true}
+clap = { workspace = true, features = ["derive"] }
+futures = {workspace = true}
+tracing = {workspace = true}
+tracing-subscriber = {workspace = true}
+surrealmud-shared = { path = "../surrealmud-shared"}
+surrealdb = {workspace = true}
+serde = {workspace = true}
+serde_json = {workspace = true}
+bitflags = {workspace = true}
