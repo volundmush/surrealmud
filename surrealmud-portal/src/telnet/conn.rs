@@ -235,6 +235,7 @@ impl<T> TelnetProtocol<T> where T: AsyncRead + AsyncWrite + Send + 'static + Unp
             conn: Framed::new(conn, TelnetCodec::new(8192)),
             tx_protocol,
             rx_protocol,
+            tx_db,
             running: true,
             app_buffer: BytesMut::with_capacity(1024),
             time_created: Instant::now(),
