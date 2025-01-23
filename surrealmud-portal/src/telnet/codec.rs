@@ -15,7 +15,7 @@ use flate2::{
     write::{ZlibEncoder, ZlibDecoder}
 };
 
-mod codes;
+use super::codes;
 
 // TelnetEvents are the bread and butter of this Codec.
 #[derive(Clone, Debug)]

@@ -5,7 +5,7 @@ use std::{
     vec::Vec,
     sync::LazyLock
 };
-
+use std::sync::Arc;
 use tokio::{
     io::{AsyncRead, AsyncWrite},
     sync::mpsc,
@@ -26,10 +26,13 @@ use futures::{
 use bitflags::bitflags;
 use serde::{Deserialize, Serialize};
 use serde_json::value as JsonValue;
-
-use crate::telnet::{
-    codes as tc,
-    codec::{TelnetCodec, TelnetEvent},
+use surrealmud_shared::TotalConf;
+use crate::{
+    telnet::{
+        codes as tc,
+        codec::{TelnetCodec, TelnetEvent},
+    },
+    surreal::Msg2Db
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -158,6 +161,40 @@ impl Default for TelnetTimers {
     }
 }
 
+fn ensure_crlf(input: &str) -> String {
+    let mut result = String::with_capacity(input.len());
+    let mut prev_char_is_cr = false;
+    let iac = char::from(255);
+
+    for c in input.chars() {
+        match c {
+            '\r' => {
+                prev_char_is_cr = true;
+                result.push('\r');
+            },
+            '\n' => {
+                if !prev_char_is_cr {
+                    result.push('\r');
+                }
+                result.push(c);
+                prev_char_is_cr = false;
+            },
+            iac => {
+                // This is a telnet IAC character, so we need to escape it.
+                result.push(iac);
+                result.push(iac);
+                prev_char_is_cr = false;
+            },
+            _ => {
+                result.push(c);
+                prev_char_is_cr = false;
+            }
+        }
+    }
+
+    result
+}
+
 pub enum Msg2TelnetProtocol {
     GameClose,
     GMCP(String, JsonValue),
@@ -168,7 +205,7 @@ pub enum Msg2TelnetProtocol {
 pub struct TelnetProtocol<T> {
     // This serves as a higher-level actor that abstracts a bunch of the lower-level
     // nitty-gritty so the Session doesn't need to deal with it.
-    conn_id: usize,
+    conf: Arc<TotalConf>,
     op_state: HashMap<u8, TelnetOptionState>,
     config: ProtocolCapabilities,
     handshakes_left: TelnetHandshakes,
@@ -183,25 +220,33 @@ pub struct TelnetProtocol<T> {
     time_activity: Instant,
     timers: TelnetTimers,
     tx_protocol: mpsc::Sender<Msg2TelnetProtocol>,
-    rx_protocol: mpsc::Receiver<Msg2TelnetProtocol>
+    rx_protocol: mpsc::Receiver<Msg2TelnetProtocol>,
+    tx_db: mpsc::Sender<Msg2Db>
 }
 
 
 impl<T> TelnetProtocol<T> where T: AsyncRead + AsyncWrite + Send + 'static + Unpin + Sync {
-    pub fn new(conn_id: usize, conn: Framed<T, TelnetCodec>, addr: SocketAddr, hostnames: Vec<String>, tls: bool) -> Self {
+    pub fn new(conf: Arc<TotalConf>, conn: T, addr: SocketAddr, hostnames: Vec<String>, tx_db: mpsc::Sender<Msg2Db>, tls: bool) -> Self {
 
         let (tx_protocol, rx_protocol) = mpsc::channel(10);
 
         let mut out = Self {
-            conn_id,
-            conn,
+            conf,
+            conn: Framed::new(conn, TelnetCodec::new(8192)),
             tx_protocol,
             rx_protocol,
             running: true,
             app_buffer: BytesMut::with_capacity(1024),
             time_created: Instant::now(),
             time_activity: Instant::now(),
-            ..Default::default()
+            timers: TelnetTimers::default(),
+            active: false,
+            sent_link: false,
+            ttype_count: 0,
+            ttype_last: None,
+            op_state: HashMap::new(),
+            config: Default::default(),
+            handshakes_left: Default::default()
         };
         // Stack overflow before reaching this point.
         out.config.tls = tls;
@@ -232,7 +277,7 @@ impl<T> TelnetProtocol<T> where T: AsyncRead + AsyncWrite + Send + 'static + Unp
             Ok(_) => true,
             Err(e) => {
                 self.running = false;
-                let _ = self.tx_portal.send(Msg2Portal::ClientDisconnected(self.conn_id, String::from(e.to_string()))).await;
+                //let _ = self.tx_portal.send(Msg2Portal::ClientDisconnected(self.conn_id, String::from(e.to_string()))).await;
                 false
             }
         }
@@ -244,12 +289,12 @@ impl<T> TelnetProtocol<T> where T: AsyncRead + AsyncWrite + Send + 'static + Unp
         for (code, tel_op) in TELNET_OPTIONS.iter() {
 
             let mut state = TelnetOptionState::default();
-            if(tel_op & TelnetOption::START_LOCAL) {
+            if(tel_op.contains(TelnetOption::START_LOCAL)) {
                 state.local.negotiating = true;
                 self.send(TelnetEvent::Negotiate(tc::WILL, *code)).await;
                 self.handshakes_left.local.insert(*code);
             }
-            if(tel_op & TelnetOption::START_REMOTE) {
+            if(tel_op.contains(TelnetOption::START_REMOTE)) {
                 state.remote.negotiating = true;
                 self.send(TelnetEvent::Negotiate(tc::DO, *code)).await;
                 self.handshakes_left.remote.insert(*code);
@@ -359,12 +404,7 @@ impl<T> TelnetProtocol<T> where T: AsyncRead + AsyncWrite + Send + 'static + Unp
             let _ = self.handle_protocol_command(cmd);
         } else if self.sent_link {
             // We must format the command as a Msg2PortalFromClient::Data, so we must encapsulate this in a MudData.
-            let d = MudData {
-                cmd: String::from("text"),
-                args: vec![JsonValue::String(cmd)],
-                kwargs: Default::default(),
-            };
-            let _ = self.tx_portal.send(Msg2Portal::FromClient(self.conn_id, Msg2PortalFromClient::Data(vec![d]))).await;
+
         }
     }
 
@@ -378,75 +418,25 @@ impl<T> TelnetProtocol<T> where T: AsyncRead + AsyncWrite + Send + 'static + Unp
                 self.running = false;
             },
             Msg2TelnetProtocol::GMCP(v, j) => {
-
+                let mut gmcp_data = Vec::new();
+                gmcp_data.push(v);
+                gmcp_data.push(j.to_string());
+                let gmcp_out = gmcp_data.join(" ");
+                let _ = self.send(TelnetEvent::SubNegotiate(tc::GMCP, Bytes::from(gmcp_out))).await;
             },
             Msg2TelnetProtocol::Text(t) => {
-
-            }
-        }
-    }
-
-    async fn process_protocol_message_data(&mut self, d: MudData) {
-        let mut to_send: Vec<TelnetEvent>  = Vec::new();
-
-        match d.cmd.as_str() {
-            "text" => {
-                // d.args is a Vec<JsonValue> and ideally each JsonValue is a string.
-                // Just send them all as-is. It's up to the game server to handle line splits.
-                for jv in d.args {
-                    if let JsonValue::String(s) = jv {
-                        to_send.push(TelnetEvent::Data(Bytes::from(ensure_crlf(&s))));
-                    }
-                }
+                let _ = self.send(TelnetEvent::Data(Bytes::from(ensure_crlf(&t)))).await;
             },
-            "prompt" => {
-                // Prompts are similar to text but end in IAC GA or something to that effect. TODO.
-            }
-            "mssp" => {
-                // This will handle MSSP (Mud Server Status Protocol) data. For this, we need to
-                // extract the key-values from d.kwargs (which must be strings), format them as
-                // a sequence of <key> <value>, join them with newlines, and send them as a
-                // subnegotiation packet IAC SB <MSSP> <lines> IAC SE.
+            Msg2TelnetProtocol::MSSP(v) => {
+                // this message should come from the DbManager, and it needs to be forwarded to the client.
                 let mut mssp_data = Vec::new();
-                for (k, v) in d.kwargs {
+                for (k, v) in v {
                     mssp_data.push(format!("{} {}", k, v));
                 }
                 let mssp_data = mssp_data.join("\r\n");
-                to_send.push(TelnetEvent::SubNegotiate(tc::MSSP, Bytes::from(mssp_data)));
-            },
-            _ => {
-                // Anything that isn't text, a prompt, or MSSP, is going to be sent as GMCP.
-                // GMCP data is sent via IAC SB <GMCP> <cmd>[ <json>] IAC SE. the json data part is
-                // optional and must be separated from the string <cmd> by a space if present.
-                // Since our MudData struct only has args and kwargs, the json data will be sent
-                // as a list of args and kwargs. So for example, the client might see:
-                // IAC SB GMCP room.data [[], {"name": "The Hall of Limbo", "id": 50}] IAC SE
-                // In this case cmd is room.data, and args was an empty vec, but kwargs had an object.
-                // The empty data structures must always be sent as [] and {} respectively.
-                // For our implementation, the client will ALWAYS be receiving the json even if it's
-                // empty, for consistency's sake.
-                let mut gmcp_data = Vec::new();
-                gmcp_data.push(d.cmd);
-                let mut gmcp_json = Vec::new();
-                // For our process, let's convert args and kwargs to json and send them as a string.
-
-                gmcp_json.push(JsonValue::Array(d.args));
-                gmcp_json.push(JsonValue::Object(d.kwargs.into_iter().map(|(k, v)| (k, v)).collect()));
-                let json_data = JsonValue::Array(gmcp_json);
-
-                gmcp_data.push(json_data.to_string());
-
-                let gmcp_out = gmcp_data.join(" ");
-                to_send.push(TelnetEvent::SubNegotiate(tc::GMCP, Bytes::from(gmcp_out)));
+                let _ = self.send(TelnetEvent::SubNegotiate(tc::MSSP, Bytes::from(mssp_data))).await;
             }
         }
-
-        for te in to_send {
-            if !self.send(te).await {
-                break;
-            }
-        }
-
     }
 
     async fn receive_negotiate(&mut self, command: u8, op: u8) {
@@ -640,24 +630,11 @@ impl<T> TelnetProtocol<T> where T: AsyncRead + AsyncWrite + Send + 'static + Unp
                         if let Some(cmd) = parts.next() {
                             if let Some(data) = parts.next() {
 
-                                let d = MudData {
-                                    cmd: cmd.to_string(),
-                                    args: vec![JsonValue::from(data)],
-                                    kwargs: HashMap::new()
-                                };
-                                let m = Msg2PortalFromClient::Data(vec![d]);
-                                let _ = self.tx_portal.send(Msg2Portal::FromClient(self.conn_id, m)).await;
                             }
                         }
                     }
                     else {
-                        let d = MudData {
-                            cmd: s,
-                            args: vec![],
-                            kwargs: HashMap::new()
-                        };
-                        let m = Msg2PortalFromClient::Data(vec![d]);
-                        let _ = self.tx_portal.send(Msg2Portal::FromClient(self.conn_id, m)).await;
+
                     }
                 }
             },
@@ -830,7 +807,7 @@ impl<T> TelnetProtocol<T> where T: AsyncRead + AsyncWrite + Send + 'static + Unp
 
     async fn update_capabilities(&mut self) {
         if self.sent_link {
-            let _ = self.tx_portal.send(Msg2Portal::FromClient(self.conn_id, Msg2PortalFromClient::Capabilities(self.config.clone()))).await;
+
         }
     }
 }

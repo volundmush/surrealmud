@@ -18,3 +18,4 @@ surrealdb = {workspace = true}
 serde = {workspace = true}
 serde_json = {workspace = true}
 bitflags = {workspace = true}
+trust-dns-resolver = {workspace = true

@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use config::{Config, File, FileFormat};
+use config::{Config, File, FileFormat, ConfigError};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, Default)]
 pub struct SurrealConf {
@@ -26,14 +26,13 @@ pub struct TotalConf {
 // A global that will be set *once*
 
 impl TotalConf {
-    pub fn set(mode: &str) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn set(mode: &str) -> Result<Self, ConfigError> {
         Config::builder()
             .add_source(File::new("config.default", FileFormat::Toml).required(true))
             .add_source(File::new(&format!("config.{}", mode), FileFormat::Toml).required(true))
             .add_source(File::new("config.user", FileFormat::Toml).required(false))
             .add_source(File::new(&format!("config.user.{}", mode), FileFormat::Toml).required(false))
-            .build()?
-            .try_deserialize()?
+            .build()?.try_deserialize()
     }
 }
 
