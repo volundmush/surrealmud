@@ -25,7 +25,7 @@ use futures::{
 
 use bitflags::bitflags;
 use serde::{Deserialize, Serialize};
-use serde_json::value as JsonValue;
+use serde_json::Value as JsonValue;
 use surrealmud_shared::TotalConf;
 use crate::{
     telnet::{

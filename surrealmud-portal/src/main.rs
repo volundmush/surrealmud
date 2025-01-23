@@ -11,14 +11,10 @@ use tokio::sync::mpsc::{Sender, Receiver, channel};
 use tracing::{error, info, Level};
 use tracing_subscriber;
 
-use surrealdb::{Error, Surreal};
-use surrealdb::opt::auth::Root;
-use surrealdb::engine::remote::ws::{Ws, Wss, Client};
-
 use surrealmud_shared::TotalConf;
 
 use surrealmud_portal::{
-    surreal::Msg2Db,
+    surreal::{Msg2Db, DbManager},
     telnet::listen::TelnetListener
 };
 
@@ -38,23 +34,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut v = Vec::new();
 
     info!("Starting up SurrealDB to {}, tls: {}", conf.surreal.address, conf.surreal.tls);
-    let mut db = if(conf.surreal.tls) {
-        Surreal::new::<Wss>(&conf.surreal.address).await?
-    } else {
-        Surreal::new::<Ws>(&conf.surreal.address).await?
-    };
+    let mut db = DbManager::new(conf.clone()).await?;
 
-    let (sdb_sender, sdb_receiver) = channel::<Msg2Db>(10);
+    db.setup().await?;
 
-    let mut addr = SocketAddr::from(&conf.portal.telnet);
+    let tx_db = db.tx_db.clone();
+    v.push(tokio::spawn(async move {db.run().await;}));
 
     info!("Starting up telnet acceptor on {}...", conf.portal.telnet);
-    let mut telnet_acceptor = TelnetListener::new(conf.clone(), addr, sdb_sender).await?;
+    let mut telnet_acceptor = TelnetListener::new(conf.clone(), tx_db.clone()).await?;
+
+    let tx_telnet = telnet_acceptor.tx_telnet.clone();
     v.push(tokio::spawn(async move {telnet_acceptor.run().await;}));
 
     info!("Starting all tasks...");
     join_all(v).await;
 
-    info!("Thermite shutting down.");
+    info!("surrealmud-portal shutting down.");
     Ok(())
 }
