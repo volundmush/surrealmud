@@ -63,7 +63,26 @@ impl DbManager {
         Ok(())
     }
 
+    fn check_site(&self, hostnames: &Vec<String>, ip: &std::net::IpAddr) -> bool {
+        // TODO: put in the pull logic later.
+        true
+    }
+
     pub async fn run(&mut self) {
+        loop {
+            tokio::select! {
+                Some(msg) = self.rx_db.recv() => {
+                    match msg {
+                        Msg2Db::GetMSSP(tx) => {
+                            let _ = tx.send(Msg2TelnetProtocol::MSSP(self.mssp.clone())).await;
+                        },
+                        Msg2Db::CheckSite(tx, hostnames, ip) => {
+                            let _ = tx.send(self.check_site(&hostnames, &ip));
+                        }
+                    }
+                }
+            }
+        }
 
     }
 }

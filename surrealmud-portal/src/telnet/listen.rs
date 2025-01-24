@@ -1,6 +1,7 @@
 use std::{
     net::SocketAddr,
-    sync::Arc
+    sync::Arc,
+    str::FromStr
 };
 use std::net::ToSocketAddrs;
 use tokio::{
@@ -31,7 +32,7 @@ pub struct TelnetListener {
 
 impl TelnetListener {
     pub async fn new(conf: Arc<TotalConf>, tx_db: mpsc::Sender<Msg2Db>) -> Result<Self, Box<dyn std::error::Error>> {
-        let addr = conf.portal.telnet.to_socket_addrs()?.next().ok_or("Could not resolve telnet address")?;
+        let addr = SocketAddr::from_str(&conf.portal.telnet)?;
 
         let listener = TcpListener::bind(addr).await?;
         let resolver = TokioAsyncResolver::tokio_from_system_conf()?;

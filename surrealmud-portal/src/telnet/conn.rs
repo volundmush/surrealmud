@@ -45,7 +45,6 @@ pub enum Color {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProtocolCapabilities {
-    pub protocol: &'static str,
     pub encryption: bool,
     pub client_name: String,
     pub client_version: String,
@@ -80,7 +79,6 @@ pub struct ProtocolCapabilities {
 impl Default for ProtocolCapabilities {
     fn default() -> Self {
         Self {
-            protocol: "telnet",
             width: 78,
             height: 24,
             client_name: "UNKNOWN".to_string(),
